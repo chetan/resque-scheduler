@@ -1,5 +1,6 @@
 require 'rufus/scheduler'
 require 'thwait'
+require 'redis-lock'
 
 module Resque
 
@@ -17,7 +18,7 @@ module Resque
 
       # If set, will try to update the schulde in the loop
       attr_accessor :dynamic
-      
+
       # Amount of time in seconds to sleep between polls of the delayed
       # queue.  Defaults to 5
       attr_writer :poll_sleep_amount
@@ -26,7 +27,7 @@ module Resque
       def scheduled_jobs
         @@scheduled_jobs
       end
-      
+
       def poll_sleep_amount
         @poll_sleep_amount ||= 5 # seconds
       end
@@ -39,17 +40,21 @@ module Resque
 
         # Load the schedule into rufus
         # If dynamic is set, load that schedule otherwise use normal load
-        if dynamic
-          reload_schedule!
-        else
-          load_schedule!
+        Resque.redis.lock_for_update(:resque_scheduler) do
+          if dynamic
+            reload_schedule!
+          else
+            load_schedule!
+          end
         end
 
         # Now start the scheduling part of the loop.
         loop do
           begin
-            handle_delayed_items
-            update_schedule if dynamic
+            Resque.redis.lock_for_update(:resque_scheduler) do
+              handle_delayed_items
+              update_schedule if dynamic
+            end
           rescue Errno::EAGAIN, Errno::ECONNRESET => e
             warn e.message
           end
@@ -75,7 +80,7 @@ module Resque
         end
       end
 
-      def print_schedule 
+      def print_schedule
         if rufus_scheduler
           log! "Scheduling Info\tLast Run"
           scheduler_jobs = rufus_scheduler.all_jobs
@@ -89,7 +94,7 @@ module Resque
       # rufus scheduler instance
       def load_schedule!
         procline "Loading Schedule"
-         
+
         # Need to load the schedule from redis for the first time if dynamic
         Resque.reload_schedule! if dynamic
 
@@ -168,7 +173,7 @@ module Resque
         yield
         exit if @shutdown
       end
-      
+
       def handle_errors
         begin
           yield
